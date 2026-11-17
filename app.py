@@ -1,20 +1,24 @@
-"""Local page where a student types a website brief."""
+"""Local page where a student types a website brief.
+
+Vercel serves the Flask app named `app`. `python app.py` still opens it locally.
+"""
 
 import html
+import json
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
 
 os.chdir(Path(__file__).resolve().parent)
 
+from flask import Flask, request
+
 import website_crew
 
+app = Flask(__name__)
 HOST = "127.0.0.1"
 PORT = 8000
 OUTPUT_DIR = Path("output")
-SITE_FILES = {"index.html": "text/html; charset=utf-8", "draft.html": "text/html; charset=utf-8"}
 BUILD_LOCK = threading.Lock()
 
 FORM = """<!DOCTYPE html>
@@ -35,6 +39,7 @@ FORM = """<!DOCTYPE html>
   .note {{ color: #5c564c; }}
   .error {{ background: #fff; border-left: 4px solid #9b2c2c; padding: 0.75rem 1rem; }}
   iframe {{ width: 100%; height: 75vh; border: 1px solid #c9c2b4; border-radius: 8px; background: #fff; }}
+  pre {{ white-space: pre-wrap; background: #fff; padding: 1rem; border-radius: 8px; }}
   a {{ color: #0f5c4c; }}
 </style>
 </head>
@@ -57,102 +62,95 @@ FORM = """<!DOCTYPE html>
     button.disabled = true;
     button.textContent = "The crew is building your page…";
   }});
+  const openPage = document.getElementById("open-page");
+  const pageData = document.getElementById("page-data");
+  if (openPage && pageData) {{
+    openPage.addEventListener("click", (event) => {{
+      event.preventDefault();
+      const html = JSON.parse(pageData.textContent);
+      const url = URL.createObjectURL(new Blob([html], {{type: "text/html"}}));
+      window.open(url, "_blank");
+    }});
+  }}
 </script>
 </body>
 </html>
 """
 
 
-def page(message: str = "", brief: str = "", result: str = "") -> bytes:
-    html_page = FORM.format(
+def page(message: str = "", brief: str = "", result: str = "") -> str:
+    return FORM.format(
         message=message,
         brief=html.escape(brief),
         result=result,
     )
-    return html_page.encode("utf-8")
 
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        path = self.path.split("?", 1)[0]
-        if path in ("/", "/index"):
-            self._send(200, page())
-            return
-        if path.startswith("/site/"):
-            self._send_site(path.removeprefix("/site/"))
-            return
-        self._send(404, page("<p class='error'>That page was not found.</p>"))
+def result_block(built: dict[str, str]) -> str:
+    notes = html.escape(built["design"])
+    preview = html.escape(built["page"], quote=True)
+    payload = json.dumps(built["page"]).replace("<", "\\u003c")
+    return f"""
+    <h2>Your page</h2>
+    <p><a id="open-page" href="#">Open the page</a></p>
+    <iframe title="Generated website" srcdoc="{preview}"></iframe>
+    <h2>Design notes</h2>
+    <pre>{notes}</pre>
+    <script type="application/json" id="page-data">{payload}</script>
+    """
 
-    def do_POST(self) -> None:
-        if self.path.split("?", 1)[0] != "/build":
-            self._send(404, page("<p class='error'>That page was not found.</p>"))
-            return
 
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(min(length, 8000)).decode("utf-8", errors="replace")
-        brief = parse_qs(raw).get("brief", [""])[0].strip()
-        if not brief:
-            self._send(400, page("<p class='error'>Type a website request first.</p>"))
-            return
-        if not BUILD_LOCK.acquire(blocking=False):
-            self._send(
-                409,
-                page("<p class='error'>A website is already being built. Wait for it to finish.</p>", brief),
-            )
-            return
-        try:
-            website_crew.run_brief(brief)
-        except Exception as exc:
-            self._send(500, page(f"<p class='error'>{html.escape(str(exc))}</p>", brief))
-            return
-        finally:
-            BUILD_LOCK.release()
+@app.get("/")
+def home():
+    return page(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
-        result = """
-        <h2>Your page</h2>
-        <p><a href="/site/index.html" target="_blank">Open the page</a>
-        · <a href="/site/design.md">Read the design notes</a></p>
-        <iframe title="Generated website" src="/site/index.html"></iframe>
-        """
-        self._send(200, page(brief=brief, result=result))
 
-    def _send_site(self, name: str) -> None:
-        if name == "design.md":
-            path = OUTPUT_DIR / "design.md"
-            if not path.is_file():
-                self._send(404, page("<p class='error'>No design notes yet.</p>"))
-                return
-            notes = html.escape(path.read_text(encoding="utf-8"))
-            body = page(result=f"<h2>Design notes</h2><pre>{notes}</pre><p><a href='/'>Back</a></p>")
-            self._send(200, body)
-            return
-        content_type = SITE_FILES.get(name)
-        path = OUTPUT_DIR / name
-        if content_type is None or not path.is_file():
-            self._send(404, page("<p class='error'>That file was not found.</p>"))
-            return
-        data = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+@app.post("/build")
+def build():
+    brief = (request.form.get("brief") or "").strip()
+    if not brief:
+        body = page("<p class='error'>Type a website request first.</p>")
+        return body, 400, {"Content-Type": "text/html; charset=utf-8"}
+    if not BUILD_LOCK.acquire(blocking=False):
+        body = page(
+            "<p class='error'>A website is already being built. Wait for it to finish.</p>",
+            brief,
+        )
+        return body, 409, {"Content-Type": "text/html; charset=utf-8"}
+    try:
+        built = website_crew.run_brief(brief)
+    except Exception as exc:
+        body = page(f"<p class='error'>{html.escape(str(exc))}</p>", brief)
+        return body, 500, {"Content-Type": "text/html; charset=utf-8"}
+    finally:
+        BUILD_LOCK.release()
+    body = page(brief=brief, result=result_block(built))
+    return body, 200, {"Content-Type": "text/html; charset=utf-8"}
 
-    def _send(self, status: int, body: bytes) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def log_message(self, format: str, *args) -> None:
-        print(f"{self.address_string()} {format % args}")
+@app.get("/site/<name>")
+def site_file(name: str):
+    if name == "design.md":
+        path = OUTPUT_DIR / "design.md"
+        if not path.is_file():
+            body = page("<p class='error'>No design notes yet.</p>")
+            return body, 404, {"Content-Type": "text/html; charset=utf-8"}
+        notes = html.escape(path.read_text(encoding="utf-8"))
+        body = page(result=f"<h2>Design notes</h2><pre>{notes}</pre><p><a href='/'>Back</a></p>")
+        return body, 200, {"Content-Type": "text/html; charset=utf-8"}
+    if name not in {"index.html", "draft.html"}:
+        body = page("<p class='error'>That file was not found.</p>")
+        return body, 404, {"Content-Type": "text/html; charset=utf-8"}
+    path = OUTPUT_DIR / name
+    if not path.is_file():
+        body = page("<p class='error'>That file was not found.</p>")
+        return body, 404, {"Content-Type": "text/html; charset=utf-8"}
+    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Open http://{HOST}:{PORT}", flush=True)
-    server.serve_forever()
+    app.run(host=HOST, port=PORT, threaded=True)
 
 
 if __name__ == "__main__":

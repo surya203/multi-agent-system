@@ -14,7 +14,7 @@ Requires Python 3.10, 3.11, 3.12, or 3.13, and a [Groq API key](https://console.
 python --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 copy .env.example .env
 ```
 
@@ -41,3 +41,9 @@ python website_crew.py "A one-page site for a student photography portfolio"
 Open `output/index.html` in a browser. Compare it with `output/design.md`.
 
 Keep the real key in `.env` only. Do not commit it.
+
+## Deploy on Vercel
+
+Vercel installs `requirements.txt` only. CrewAI is left out of that file because the library is about 900 MB and a Python function on Vercel can be at most 500 MB. The hosted site still runs the designer, frontend developer, and review developer, in that order, by calling Groq directly.
+
+In the Vercel project settings, add `GROQ_API_KEY` for Production (the same key as `.env`). Then push `main`. A build takes about a minute to finish a page, which fits the 300 second function limit in `vercel.json`.

@@ -1,3 +1,2 @@
-crewai
-litellm
+flask
 python-dotenv
